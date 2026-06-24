@@ -25,5 +25,5 @@ graph-tracking = "graph_tracking.run_tracking:main"
 [tool.setuptools.package-dir]
 "graph_tracking" = "."
 
-[tool.setuptools.packages]
+[tool.setuptools]
 packages = ["graph_tracking", "graph_tracking.synthetic"]
