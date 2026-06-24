@@ -44,6 +44,7 @@ class LinkParams:
     seed_rng: int = 0
     allow_3_frame: bool = True
     use_bidirectional_graph: bool = False  # merge forward + backward 4-frame graphs before assignment
+    use_numba: bool = True  # Numba CSR grid queries when numba is installed
     progress_interval: int = 5000  # print every N seeds; 0 = quiet except phase lines
 
 
@@ -298,6 +299,17 @@ def _paths_from_frame3(
     return candidates, branch_counts
 
 
+def _make_grid(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    cell_size: float,
+    *,
+    use_numba: bool,
+) -> SpatialGrid:
+    return SpatialGrid(x, y, z, cell_size=cell_size, use_numba=use_numba)
+
+
 def _enumerate_forward(
     block: BlockFrames,
     params: LinkParams,
@@ -310,10 +322,11 @@ def _enumerate_forward(
     b = params.box_size_track
     track_cs = track_grid_cell_size(b)
     init_cs = initial_grid_cell_size(offsets, b)
+    nb = params.use_numba
 
-    grid1_initial = SpatialGrid(f1.x, f1.y, f1.z, cell_size=init_cs)
-    grid2 = SpatialGrid(f2.x, f2.y, f2.z, cell_size=track_cs)
-    grid3 = SpatialGrid(block.frames[3].x, block.frames[3].y, block.frames[3].z, cell_size=track_cs)
+    grid1_initial = _make_grid(f1.x, f1.y, f1.z, init_cs, use_numba=nb)
+    grid2 = _make_grid(f2.x, f2.y, f2.z, track_cs, use_numba=nb)
+    grid3 = _make_grid(block.frames[3].x, block.frames[3].y, block.frames[3].z, track_cs, use_numba=nb)
 
     seeds0 = np.arange(f0.n, dtype=np.int64)
     if params.max_seeds > 0 and params.max_seeds < f0.n:
@@ -334,7 +347,7 @@ def _enumerate_forward(
         seeds1 = np.arange(f1.n, dtype=np.int64)
         if params.max_seeds > 0 and params.max_seeds < f1.n:
             seeds1 = subsample_indices(f1.n, params.max_seeds, rng)
-        grid2_initial = SpatialGrid(f2.x, f2.y, f2.z, cell_size=init_cs)
+        grid2_initial = _make_grid(f2.x, f2.y, f2.z, init_cs, use_numba=nb)
         log(f"[graph] Enumerating 3-frame paths from frame 1 ({len(seeds1)} seeds)...")
         c1, branches1 = _paths_from_frame1(
             block, params, seeds1, grid2_initial, grid3, offsets,
@@ -366,9 +379,9 @@ def _enumerate_backward(
     track_cs = track_grid_cell_size(b)
     init_cs = initial_grid_cell_size(bwd_offsets, b)
 
-    grid2_initial = SpatialGrid(f2.x, f2.y, f2.z, cell_size=init_cs)
-    grid1 = SpatialGrid(f1.x, f1.y, f1.z, cell_size=track_cs)
-    grid0 = SpatialGrid(f0.x, f0.y, f0.z, cell_size=track_cs)
+    grid2_initial = _make_grid(f2.x, f2.y, f2.z, init_cs, use_numba=params.use_numba)
+    grid1 = _make_grid(f1.x, f1.y, f1.z, track_cs, use_numba=params.use_numba)
+    grid0 = _make_grid(f0.x, f0.y, f0.z, track_cs, use_numba=params.use_numba)
 
     seeds3 = np.arange(f3.n, dtype=np.int64)
     if params.max_seeds > 0 and params.max_seeds < f3.n:
