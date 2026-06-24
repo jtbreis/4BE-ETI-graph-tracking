@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "graph-tracking"
+version = "0.1.0"
+description = "Graph-based 4-frame particle tracking for 4D-PTV"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "h5py",
+    "matplotlib",
+    "tqdm",
+    "python-4be-eti",
+]
+
+[project.optional-dependencies]
+dev = ["ptv-check-tracking", "scipy"]
+
+[project.scripts]
+graph-tracking = "graph_tracking.run_tracking:main"
+
+[tool.setuptools.package-dir]
+"graph_tracking" = "."
+
+[tool.setuptools.packages]
+packages = ["graph_tracking", "graph_tracking.synthetic"]
