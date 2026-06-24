@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import spatial_grid_numba as _sgn
+
 
 def track_grid_cell_size(box_size_track: float) -> float:
     """Cell size for 0.2 mm (typical) tracking-box queries."""
@@ -38,6 +40,8 @@ class SpatialGrid:
         y: np.ndarray,
         z: np.ndarray,
         cell_size: float,
+        *,
+        use_numba: bool | None = None,
     ):
         self.x = np.asarray(x, dtype=np.float64)
         self.y = np.asarray(y, dtype=np.float64)
@@ -51,11 +55,50 @@ class SpatialGrid:
         self.ymin = float(self.y.min()) if self.n else 0.0
         self.zmin = float(self.z.min()) if self.n else 0.0
 
-        self._cells: dict[tuple[int, int, int], list[int]] = {}
+        if use_numba is None:
+            use_numba = _sgn.numba_available()
+        self._use_numba = bool(use_numba and _sgn.numba_available())
+        self._cells_cache: dict[tuple[int, int, int], list[int]] | None = None
+        self._query_out: np.ndarray | None = None
+
+        if self._use_numba:
+            self._flat = _sgn.build_flat_grid(
+                self.x, self.y, self.z,
+                self.xmin, self.ymin, self.zmin, self.cell_size,
+            )
+        else:
+            self._flat = None
+            inv = 1.0 / self.cell_size
+            cells: dict[tuple[int, int, int], list[int]] = {}
+            for i in range(self.n):
+                key = self._cell_key(self.x[i], self.y[i], self.z[i], inv)
+                cells.setdefault(key, []).append(i)
+            self._cells_cache = cells
+
+    def _ensure_query_buffer(self) -> np.ndarray:
+        if self._query_out is None or self._query_out.size < self.n:
+            self._query_out = np.empty(max(self.n, 1), dtype=np.int64)
+        return self._query_out
+
+    def _ensure_cells_cache(self) -> dict[tuple[int, int, int], list[int]]:
+        if self._cells_cache is not None:
+            return self._cells_cache
+        if not self._use_numba or self._flat is None:
+            self._cells_cache = {}
+            return self._cells_cache
+
         inv = 1.0 / self.cell_size
+        cells: dict[tuple[int, int, int], list[int]] = {}
         for i in range(self.n):
             key = self._cell_key(self.x[i], self.y[i], self.z[i], inv)
-            self._cells.setdefault(key, []).append(i)
+            cells.setdefault(key, []).append(i)
+        self._cells_cache = cells
+        return self._cells_cache
+
+    @property
+    def _cells(self) -> dict[tuple[int, int, int], list[int]]:
+        """Backward-compatible cell map (lazy when using Numba queries)."""
+        return self._ensure_cells_cache()
 
     def _cell_key(self, x, y, z, inv=None) -> tuple[int, int, int]:
         if inv is None:
@@ -79,6 +122,25 @@ class SpatialGrid:
         if self.n == 0:
             return np.array([], dtype=np.int64)
 
+        if self._use_numba and self._flat is not None:
+            return _sgn.query_aabb_flat(
+                self.x,
+                self.y,
+                self.z,
+                self.xmin,
+                self.ymin,
+                self.zmin,
+                self.cell_size,
+                self._flat,
+                xlo,
+                xhi,
+                ylo,
+                yhi,
+                zlo,
+                zhi,
+                self._ensure_query_buffer(),
+            )
+
         inv = 1.0 / self.cell_size
         ix0 = int(np.floor((xlo - self.xmin) * inv))
         ix1 = int(np.floor((xhi - self.xmin) * inv))
@@ -87,11 +149,12 @@ class SpatialGrid:
         iz0 = int(np.floor((zlo - self.zmin) * inv))
         iz1 = int(np.floor((zhi - self.zmin) * inv))
 
+        cells = self._ensure_cells_cache()
         hits: list[int] = []
         for ix in range(ix0, ix1 + 1):
             for iy in range(iy0, iy1 + 1):
                 for iz in range(iz0, iz1 + 1):
-                    for i in self._cells.get((ix, iy, iz), ()):
+                    for i in cells.get((ix, iy, iz), ()):
                         if (
                             xlo <= self.x[i] <= xhi
                             and ylo <= self.y[i] <= yhi
@@ -158,3 +221,8 @@ class SpatialGrid:
             self.zmin + iz * cs,
             self.zmin + (iz + 1) * cs,
         )
+
+    @property
+    def cells_dict(self) -> dict[tuple[int, int, int], list[int]]:
+        """Cell → particle indices (for visualization)."""
+        return self._ensure_cells_cache()
