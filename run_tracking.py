@@ -40,9 +40,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-seeds", type=int, default=0, help="Limit frame-0 seeds (0 = all)")
     p.add_argument("--no-3-frame", action="store_true", help="Only allow 4-frame tracks")
     p.add_argument(
+        "--use-bidirectional-graph",
         "--bidirectional",
         action="store_true",
-        help="Require 4-frame paths to validate forward and backward (flipped initial box)",
+        dest="use_bidirectional_graph",
+        help="Merge forward and backward 4-frame graphs, then assign on the combined graph "
+        "(--bidirectional is an alias)",
     )
     p.add_argument("--min-track-length", type=int, default=3, help="Min frames per track in h5part output")
     p.add_argument("--progress-interval", type=int, default=5000,
@@ -73,7 +76,7 @@ def main() -> int:
         max_branch=args.max_branch,
         max_seeds=args.max_seeds,
         allow_3_frame=not args.no_3_frame,
-        require_bidirectional=args.bidirectional,
+        use_bidirectional_graph=args.use_bidirectional_graph,
         progress_interval=args.progress_interval,
     )
 
@@ -84,8 +87,8 @@ def main() -> int:
         f"Params: box_track={params.box_size_track}, max_branch={params.max_branch}, "
         f"allow_3_frame={params.allow_3_frame}, min_track_length={args.min_track_length}"
     )
-    if params.require_bidirectional:
-        print("Bidirectional 4-frame filter: ON (forward + backward enumeration)")
+    if params.use_bidirectional_graph:
+        print("Bidirectional graph mode: ON (combined forward + backward enumeration)")
 
     t0 = time.time()
     combined = None

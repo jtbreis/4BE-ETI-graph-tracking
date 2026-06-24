@@ -65,7 +65,7 @@ assert len(assigned) == 2, f"Expected 2 tracks, got {len(assigned)}"
 
 # %%
 # --- Bidirectional mode: same tracks must validate forward and backward ---
-params_bidir = LinkParams(**{**kw, "require_bidirectional": True})
+params_bidir = LinkParams(**{**kw, "use_bidirectional_graph": True})
 result_bidir = link_block(block, params_bidir)
 assigned_bidir = greedy_assign_paths(result_bidir.candidates)
 print(f"Bidirectional candidates: {result_bidir.stats['n_candidates']}")

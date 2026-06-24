@@ -32,24 +32,53 @@ def path_indices_key(candidate: PathCandidate) -> tuple[int, ...]:
     return candidate.indices
 
 
-def filter_bidirectional_four_frame(
+def combine_bidirectional_four_frame(
     forward: list[PathCandidate],
     backward: list[PathCandidate],
-) -> tuple[list[PathCandidate], set[tuple[int, ...]]]:
+) -> tuple[list[PathCandidate], dict[str, int]]:
     """
-    Keep forward 4-frame candidates whose index tuple also appears backward.
+    Merge forward and backward 4-frame candidates into one assignment graph.
 
-    Returns (filtered forward list, intersection key set).
+    Paths found in both directions get cost = forward_cost + backward_cost.
+    Paths found in only one direction keep that direction's endpoint cost.
     """
-    fwd_4 = [c for c in forward if c.length == 4 and c.start_layer == 0]
-    bwd_keys = {
-        path_indices_key(c)
+    fwd_4 = {
+        path_indices_key(c): c
+        for c in forward
+        if c.length == 4 and c.start_layer == 0
+    }
+    bwd_4 = {
+        path_indices_key(c): c
         for c in backward
         if c.length == 4 and c.start_layer == 0
     }
-    both = {path_indices_key(c) for c in fwd_4} & bwd_keys
-    kept = [c for c in fwd_4 if path_indices_key(c) in both]
-    return kept, both
+
+    both = set(fwd_4) & set(bwd_4)
+    fwd_only = set(fwd_4) - both
+    bwd_only = set(bwd_4) - both
+
+    combined: list[PathCandidate] = []
+    for key in both:
+        fc = fwd_4[key]
+        bc = bwd_4[key]
+        combined.append(
+            PathCandidate(
+                start_layer=0,
+                indices=key,
+                cost=fc.cost + bc.cost,
+            )
+        )
+    for key in fwd_only:
+        combined.append(fwd_4[key])
+    for key in bwd_only:
+        combined.append(bwd_4[key])
+
+    stats = {
+        "n_bidirectional_4frame": len(both),
+        "n_forward_only_4frame": len(fwd_only),
+        "n_backward_only_4frame": len(bwd_only),
+    }
+    return combined, stats
 
 
 def greedy_assign_paths(candidates: list[PathCandidate]) -> list[PathCandidate]:

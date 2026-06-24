@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import time
 
-from .assign import PathCandidate, filter_bidirectional_four_frame
+from .assign import PathCandidate, combine_bidirectional_four_frame
 from .kinematics import (
     distance_xyz,
     predict_first_frame_position_xyz,
@@ -43,7 +43,7 @@ class LinkParams:
     max_seeds: int = 0  # 0 = all seeds on frame 0 / frame 1
     seed_rng: int = 0
     allow_3_frame: bool = True
-    require_bidirectional: bool = False  # 4-frame paths must validate forward and backward
+    use_bidirectional_graph: bool = False  # merge forward + backward 4-frame graphs before assignment
     progress_interval: int = 5000  # print every N seeds; 0 = quiet except phase lines
 
 
@@ -328,7 +328,7 @@ def _enumerate_forward(
     branches = list(branches0)
     n_seeds1 = 0
 
-    if params.allow_3_frame and not params.require_bidirectional:
+    if params.allow_3_frame and not params.use_bidirectional_graph:
         seeds1 = np.arange(f1.n, dtype=np.int64)
         if params.max_seeds > 0 and params.max_seeds < f1.n:
             seeds1 = subsample_indices(f1.n, params.max_seeds, rng)
@@ -383,8 +383,9 @@ def link_block(block: BlockFrames, params: LinkParams) -> BlockResult:
     """
     Build valid path candidates in one block.
 
-    When ``require_bidirectional`` is True, only 4-frame paths that validate
-    both forward (f0 seed) and backward (f3 seed, flipped initial box) are kept.
+    When ``use_bidirectional_graph`` is True, forward (f0 seed) and backward
+    (f3 seed, flipped initial box) 4-frame candidates are merged into one
+    graph; run ``greedy_assign_paths`` on that combined set.
 
     Returns path candidates (not yet assigned). Run ``greedy_assign_paths`` next.
     """
@@ -409,31 +410,23 @@ def link_block(block: BlockFrames, params: LinkParams) -> BlockResult:
     n_fwd_only_4 = 0
     n_bwd_only_4 = 0
 
-    if params.require_bidirectional:
+    if params.use_bidirectional_graph:
         bwd_candidates, bwd_branches, bwd_meta = _enumerate_backward(
             block, params, rng, offsets, ppi,
         )
         branches.extend(bwd_branches)
         n_seeds_tried += bwd_meta["n_seeds_frame3"]
 
-        fwd_4_keys = {
-            c.indices
-            for c in candidates
-            if c.length == 4 and c.start_layer == 0
-        }
-        bwd_4_keys = {
-            c.indices
-            for c in bwd_candidates
-            if c.length == 4 and c.start_layer == 0
-        }
-        n_bidir = len(fwd_4_keys & bwd_4_keys)
-        n_fwd_only_4 = len(fwd_4_keys - bwd_4_keys)
-        n_bwd_only_4 = len(bwd_4_keys - fwd_4_keys)
-
-        candidates, _both = filter_bidirectional_four_frame(candidates, bwd_candidates)
+        candidates, combine_stats = combine_bidirectional_four_frame(
+            candidates, bwd_candidates,
+        )
+        n_bidir = combine_stats["n_bidirectional_4frame"]
+        n_fwd_only_4 = combine_stats["n_forward_only_4frame"]
+        n_bwd_only_4 = combine_stats["n_backward_only_4frame"]
         log(
-            f"[graph] Bidirectional filter: {n_bidir} agree, "
-            f"{n_fwd_only_4} forward-only, {n_bwd_only_4} backward-only (4-frame)"
+            f"[graph] Bidirectional graph: {len(candidates)} combined candidates "
+            f"({n_bidir} both directions, {n_fwd_only_4} forward-only, "
+            f"{n_bwd_only_4} backward-only)"
         )
 
     log(f"[graph] Done: {len(candidates)} path candidates")
@@ -451,13 +444,13 @@ def link_block(block: BlockFrames, params: LinkParams) -> BlockResult:
         "n_seeds_frame1": fwd_meta["n_seeds_frame1"],
         "n_seeds_tried": n_seeds_tried,
         "mean_branches_per_seed": float(np.mean(branches)) if branches else 0.0,
-        "require_bidirectional": params.require_bidirectional,
+        "use_bidirectional_graph": params.use_bidirectional_graph,
         "n_bidirectional_4frame": n_bidir,
         "n_forward_only_4frame": n_fwd_only_4,
         "n_backward_only_4frame": n_bwd_only_4,
         "n_candidates_backward": len(bwd_candidates),
     }
-    if params.require_bidirectional:
+    if params.use_bidirectional_graph:
         stats["n_seeds_frame3"] = bwd_meta["n_seeds_frame3"]
 
     return BlockResult(

@@ -476,9 +476,13 @@ For seed A (index 0):
 
 B gets its own parallel branch from seed index 1. Wrong cross-links fail the initial x gate or miss the 0.2 mm tracking box.
 
-### Bidirectional validation (`require_bidirectional`)
+### Bidirectional graph (`use_bidirectional_graph`)
 
-Optional second pass seeds **frame 3** and walks backward in time:
+When enabled, Stage 3 runs **two** enumerations on the same 4-frame block, then merges their candidate lists before Stage 4 assignment.
+
+**Forward pass** (unchanged): seeds **frame 0**, walks f0 → f1 → f2 → f3 with the normal initial box offsets.
+
+**Backward pass**: seeds **frame 3**, walks backward in time with **flipped** initial-box signs (search opposite flow direction):
 
 ```
 f3 → f2   initial box with flipped offset signs  ([-x_hi, -x_lo] vs forward)
@@ -486,13 +490,29 @@ f2 → f1   pred₁ = 2·p₂ − p₃
 f1 → f0   pred₀ = 3·p₁ − 3·p₂ + p₃
 ```
 
-Only 4-frame index tuples `(i0, i1, i2, i3)` that appear in **both** forward and backward candidate lists are kept. Three-frame paths are disabled in this mode.
+Three-frame paths from frame 1 are **not** enumerated in this mode (`allow_3_frame` is effectively forward-only 4-frame + backward 4-frame).
 
-CLI: `--bidirectional` on `run_tracking.py`, or `LinkParams(require_bidirectional=True)`.
+#### Combining forward and backward into one graph
+
+**File:** `assign.py` — `combine_bidirectional_four_frame()`
+
+Both passes emit 4-frame `PathCandidate` objects with the same index tuple `(i₀, i₁, i₂, i₃)` but **different endpoint costs** (see [Kinematics and cost function](#kinematics-and-cost-function)). The merge builds one assignment graph:
+
+| Candidate source | Combined cost |
+|------------------|---------------|
+| Index tuple in **both** passes | `cost = cost_forward + cost_backward` |
+| **Forward-only** tuple | `cost = cost_forward` (endpoint error at frame 3) |
+| **Backward-only** tuple | `cost = cost_backward` (endpoint error at frame 0) |
+
+Paths validated in both directions therefore carry the **sum** of forward and backward prediction errors. Greedy assignment (`greedy_assign_paths`) then picks a **single** disjoint set on this merged list — it does **not** assign forward and backward separately and intersect results.
+
+**Intuition:** A path that fits kinematics well in both time directions tends to have a lower combined cost than a path that only fits one direction, but forward-only or backward-only candidates can still win if they are cheap enough and avoid detection conflicts.
+
+CLI: `--use-bidirectional-graph` on `run_tracking.py` (`--bidirectional` is an alias), or `LinkParams(use_bidirectional_graph=True)`.
 
 ### What Stage 3 outputs
 
-`link_block()` returns a `BlockResult` with candidates and stats (`n_bidirectional_4frame`, `n_forward_only_4frame`, … when bidirectional is on).
+`link_block()` returns a `BlockResult` with candidates and stats (`n_bidirectional_4frame`, `n_forward_only_4frame`, `n_backward_only_4frame`, … when bidirectional graph mode is on).
 
 ### How stages 2 and 3 fit together
 
@@ -538,11 +558,31 @@ This is equivalent to the Taylor step used in 4BE-ETI with \(\Delta t = 1\).
 
 ### Cost
 
-For **4-frame** candidates, cost is the **final prediction error** at frame 3:
+For **4-frame** candidates from the **forward** pass, cost is the **final prediction error** at frame 3:
 
 \[
-\text{cost} = \|\hat{p}_3 - p_3\|_2
+\text{cost}_\text{fwd} = \|\hat{p}_3 - p_3\|_2, \quad \hat{p}_3 = 3 p_2 - 3 p_1 + p_0
 \]
+
+For **4-frame** candidates from the **backward** pass, cost is the **first-frame prediction error** at frame 0:
+
+\[
+\text{cost}_\text{bwd} = \|\hat{p}_0 - p_0\|_2, \quad \hat{p}_0 = 3 p_1 - 3 p_2 + p_3
+\]
+
+Intermediate backward steps use the mirrored constant-velocity prediction at frame 1:
+
+\[
+\hat{p}_1 = 2 p_2 - p_3
+\]
+
+When `use_bidirectional_graph` is on and the same index tuple appears in both passes, the merged candidate uses:
+
+\[
+\text{cost} = \text{cost}_\text{fwd} + \text{cost}_\text{bwd}
+\]
+
+There is **no separate weight** on acceleration magnitude or direction — only these endpoint position errors (and their sum for bidirectional paths). Assignment ranks candidates by **ascending cost** (after preferring longer paths).
 
 For **3-frame** candidates ending at frame 2 (from frame 0):
 
@@ -711,7 +751,7 @@ Defined in `LinkParams` (`link_block.py`):
 | `max_branch` | 30 | Max candidates per branching step |
 | `max_seeds` | 0 (all) | Subsample frame-0 / frame-1 seeds; 0 = no limit |
 | `allow_3_frame` | True | Include 3-frame path types |
-| `require_bidirectional` | False | 4-frame paths must validate forward and backward (flipped initial box); disables 3-frame |
+| `use_bidirectional_graph` | False | Merge forward + backward 4-frame candidates before assignment; disables frame-1 3-frame seeds |
 | `progress_interval` | 5000 | Progress print frequency; 0 = quiet |
 | `seed_rng` | 0 | RNG seed when subsampling seeds |
 
@@ -727,7 +767,7 @@ CLI wrappers: `run_tracking.py`, `test_compare_graph_legacy.py`.
 | `spatial_grid.py` | Uniform grid; AABB and center-box queries |
 | `kinematics.py` | Prediction formulas and distance cost |
 | `link_block.py` | Enumerate `PathCandidate` list for one block |
-| `assign.py` | `PathCandidate`, `greedy_assign_paths` |
+| `assign.py` | `PathCandidate`, `combine_bidirectional_four_frame`, `greedy_assign_paths` |
 | `track_data.py` | Build `basic_utils.a` for h5part export |
 | `progress.py` | Stdout progress helpers |
 | `compare.py` | Side-by-side benchmark vs legacy |
