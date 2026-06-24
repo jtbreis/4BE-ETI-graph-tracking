@@ -9,6 +9,26 @@ from __future__ import annotations
 import numpy as np
 
 
+def track_grid_cell_size(box_size_track: float) -> float:
+    """Cell size for 0.2 mm (typical) tracking-box queries."""
+    return max(float(box_size_track), 0.5)
+
+
+def initial_grid_cell_size(
+    offsets: tuple[float, float, float, float, float, float],
+    box_size_track: float,
+) -> float:
+    """
+    Coarse cell size for the large first-step initial search window.
+
+    Derived from initial-box offset spans (often several mm). Wider cells
+    mean fewer cell visits per seed; per-particle AABB checks stay exact.
+    """
+    x_lo, x_hi, y_lo, y_hi, z_lo, z_hi = offsets
+    max_span = max(x_hi - x_lo, y_hi - y_lo, z_hi - z_lo)
+    return max(max_span / 2.0, track_grid_cell_size(box_size_track))
+
+
 class SpatialGrid:
     """Hash particles into cubic cells; query by AABB."""
 

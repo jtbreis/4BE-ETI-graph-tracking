@@ -25,7 +25,7 @@ from .kinematics import (
 )
 from .load_data import BlockFrames, subsample_indices
 from .progress import log, progress
-from .spatial_grid import SpatialGrid
+from .spatial_grid import SpatialGrid, initial_grid_cell_size, track_grid_cell_size
 
 
 @dataclass
@@ -98,7 +98,7 @@ def _paths_from_frame0(
     block: BlockFrames,
     params: LinkParams,
     seed_ids: np.ndarray,
-    grid1: SpatialGrid,
+    grid1_initial: SpatialGrid,
     grid2: SpatialGrid,
     grid3: SpatialGrid,
     offsets: tuple[float, ...],
@@ -118,7 +118,7 @@ def _paths_from_frame0(
     for si, i0 in enumerate(seed_ids, start=1):
         progress(progress_label, si, n_seeds, interval=progress_interval, t0=t0)
         p0 = np.array([f0.x[i0], f0.y[i0], f0.z[i0]])
-        ind1 = _query_initial_box(grid1, p0, offsets, mb)
+        ind1 = _query_initial_box(grid1_initial, p0, offsets, mb)
         if ind1.size == 0:
             continue
 
@@ -172,7 +172,7 @@ def _paths_from_frame1(
     block: BlockFrames,
     params: LinkParams,
     seed_ids: np.ndarray,
-    grid2: SpatialGrid,
+    grid2_initial: SpatialGrid,
     grid3: SpatialGrid,
     offsets: tuple[float, ...],
     *,
@@ -191,7 +191,7 @@ def _paths_from_frame1(
     for si, i1 in enumerate(seed_ids, start=1):
         progress(progress_label, si, n_seeds, interval=progress_interval, t0=t0)
         p1 = np.array([f1.x[i1], f1.y[i1], f1.z[i1]])
-        ind2 = _query_initial_box(grid2, p1, offsets, mb)
+        ind2 = _query_initial_box(grid2_initial, p1, offsets, mb)
         if ind2.size == 0:
             continue
 
@@ -239,7 +239,7 @@ def _paths_from_frame3(
     block: BlockFrames,
     params: LinkParams,
     seed_ids: np.ndarray,
-    grid2: SpatialGrid,
+    grid2_initial: SpatialGrid,
     grid1: SpatialGrid,
     grid0: SpatialGrid,
     offsets: tuple[float, ...],
@@ -259,7 +259,7 @@ def _paths_from_frame3(
     for si, i3 in enumerate(seed_ids, start=1):
         progress(progress_label, si, n_seeds, interval=progress_interval, t0=t0)
         p3 = np.array([f3.x[i3], f3.y[i3], f3.z[i3]])
-        ind2 = _query_initial_box(grid2, p3, offsets, mb)
+        ind2 = _query_initial_box(grid2_initial, p3, offsets, mb)
         if ind2.size == 0:
             continue
 
@@ -306,12 +306,14 @@ def _enumerate_forward(
     ppi: int,
 ) -> tuple[list[PathCandidate], list[int], dict]:
     """Forward path enumeration (frame 0 / frame 1 seeds)."""
-    f0, f1, _, _ = block.frames
+    f0, f1, f2, _ = block.frames
     b = params.box_size_track
+    track_cs = track_grid_cell_size(b)
+    init_cs = initial_grid_cell_size(offsets, b)
 
-    grid1 = SpatialGrid(f1.x, f1.y, f1.z, cell_size=max(b, 0.5))
-    grid2 = SpatialGrid(block.frames[2].x, block.frames[2].y, block.frames[2].z, cell_size=max(b, 0.5))
-    grid3 = SpatialGrid(block.frames[3].x, block.frames[3].y, block.frames[3].z, cell_size=max(b, 0.5))
+    grid1_initial = SpatialGrid(f1.x, f1.y, f1.z, cell_size=init_cs)
+    grid2 = SpatialGrid(f2.x, f2.y, f2.z, cell_size=track_cs)
+    grid3 = SpatialGrid(block.frames[3].x, block.frames[3].y, block.frames[3].z, cell_size=track_cs)
 
     seeds0 = np.arange(f0.n, dtype=np.int64)
     if params.max_seeds > 0 and params.max_seeds < f0.n:
@@ -319,7 +321,7 @@ def _enumerate_forward(
     log(f"[graph] Enumerating forward paths from frame 0 ({len(seeds0)} seeds)...")
 
     c0, branches0 = _paths_from_frame0(
-        block, params, seeds0, grid1, grid2, grid3, offsets,
+        block, params, seeds0, grid1_initial, grid2, grid3, offsets,
         progress_interval=ppi,
         progress_label="graph f0 seeds",
     )
@@ -332,9 +334,10 @@ def _enumerate_forward(
         seeds1 = np.arange(f1.n, dtype=np.int64)
         if params.max_seeds > 0 and params.max_seeds < f1.n:
             seeds1 = subsample_indices(f1.n, params.max_seeds, rng)
+        grid2_initial = SpatialGrid(f2.x, f2.y, f2.z, cell_size=init_cs)
         log(f"[graph] Enumerating 3-frame paths from frame 1 ({len(seeds1)} seeds)...")
         c1, branches1 = _paths_from_frame1(
-            block, params, seeds1, grid2, grid3, offsets,
+            block, params, seeds1, grid2_initial, grid3, offsets,
             progress_interval=ppi,
             progress_label="graph f1 seeds",
         )
@@ -360,10 +363,12 @@ def _enumerate_backward(
     f0, f1, f2, f3 = block.frames
     b = params.box_size_track
     bwd_offsets = _backward_box_offsets(offsets)
+    track_cs = track_grid_cell_size(b)
+    init_cs = initial_grid_cell_size(bwd_offsets, b)
 
-    grid2 = SpatialGrid(f2.x, f2.y, f2.z, cell_size=max(b, 0.5))
-    grid1 = SpatialGrid(f1.x, f1.y, f1.z, cell_size=max(b, 0.5))
-    grid0 = SpatialGrid(f0.x, f0.y, f0.z, cell_size=max(b, 0.5))
+    grid2_initial = SpatialGrid(f2.x, f2.y, f2.z, cell_size=init_cs)
+    grid1 = SpatialGrid(f1.x, f1.y, f1.z, cell_size=track_cs)
+    grid0 = SpatialGrid(f0.x, f0.y, f0.z, cell_size=track_cs)
 
     seeds3 = np.arange(f3.n, dtype=np.int64)
     if params.max_seeds > 0 and params.max_seeds < f3.n:
@@ -371,7 +376,7 @@ def _enumerate_backward(
     log(f"[graph] Enumerating backward paths from frame 3 ({len(seeds3)} seeds)...")
 
     candidates, branches = _paths_from_frame3(
-        block, params, seeds3, grid2, grid1, grid0, bwd_offsets,
+        block, params, seeds3, grid2_initial, grid1, grid0, bwd_offsets,
         progress_interval=ppi,
         progress_label="graph f3 seeds (backward)",
     )
