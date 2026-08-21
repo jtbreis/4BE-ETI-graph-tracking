@@ -43,9 +43,10 @@ class LinkParams:
     max_seeds: int = 0  # 0 = all seeds on frame 0 / frame 1
     seed_rng: int = 0
     allow_3_frame: bool = True
-    use_bidirectional_graph: bool = False  # merge forward + backward 4-frame graphs before assignment
+    use_bidirectional_graph: bool = False  # consensus 4-frame paths from forward + backward graphs
     use_numba: bool = True  # Numba CSR grid queries when numba is installed
-    progress_interval: int = 5000  # print every N seeds; 0 = quiet except phase lines
+    quiet_linking: bool = False  # suppress per-seed / phase logs inside link_block
+    progress_interval: int = 5000  # print every N seeds; 0 = end markers only; ignored if quiet_linking
 
 
 @dataclass
@@ -58,9 +59,33 @@ class BlockResult:
     stats: dict = field(default_factory=dict)
 
 
-def _cap(indices: np.ndarray, max_n: int) -> np.ndarray:
+@dataclass
+class MaxBranchHits:
+    """Counts spatial queries truncated by max_branch."""
+
+    events: int = 0
+    max_overflow: int = 0
+    by_stage: dict[str, int] = field(default_factory=dict)
+
+    def record(self, stage: str, raw_count: int, max_n: int) -> None:
+        if raw_count <= max_n:
+            return
+        self.events += 1
+        self.max_overflow = max(self.max_overflow, raw_count - max_n)
+        self.by_stage[stage] = self.by_stage.get(stage, 0) + 1
+
+
+def _cap(
+    indices: np.ndarray,
+    max_n: int,
+    *,
+    hits: MaxBranchHits | None = None,
+    stage: str = "",
+) -> np.ndarray:
     if max_n <= 0 or indices.size <= max_n:
         return indices
+    if hits is not None and stage:
+        hits.record(stage, int(indices.size), max_n)
     return indices[:max_n]
 
 
@@ -80,6 +105,9 @@ def _query_initial_box(
     p0: np.ndarray,
     offsets: tuple[float, ...],
     max_branch: int,
+    *,
+    hits: MaxBranchHits | None = None,
+    stage: str = "initial_box",
 ) -> np.ndarray:
     x_lo, x_hi, y_lo, y_hi, z_lo, z_hi = offsets
     return _cap(
@@ -92,6 +120,23 @@ def _query_initial_box(
             p0[2] + z_hi,
         ),
         max_branch,
+        hits=hits,
+        stage=stage,
+    )
+
+
+def _warn_max_branch_hits(
+    frame_indices: list[int],
+    params: LinkParams,
+    hits: MaxBranchHits,
+) -> None:
+    if hits.events == 0:
+        return
+    stages = ", ".join(f"{k}={v}" for k, v in sorted(hits.by_stage.items()))
+    log(
+        f"[graph] WARNING: max_branch={params.max_branch} hit on block "
+        f"{frame_indices}: {hits.events} capped quer{'y' if hits.events == 1 else 'ies'} "
+        f"(up to +{hits.max_overflow} candidates dropped per query; {stages})"
     )
 
 
@@ -106,6 +151,7 @@ def _paths_from_frame0(
     *,
     progress_interval: int = 0,
     progress_label: str = "graph f0 seeds",
+    hits: MaxBranchHits | None = None,
 ) -> tuple[list[PathCandidate], list[int]]:
     """4-frame and 3-frame (f0→f1→f2) paths seeded on frame 0."""
     f0, f1, f2, f3 = block.frames
@@ -119,7 +165,7 @@ def _paths_from_frame0(
     for si, i0 in enumerate(seed_ids, start=1):
         progress(progress_label, si, n_seeds, interval=progress_interval, t0=t0)
         p0 = np.array([f0.x[i0], f0.y[i0], f0.z[i0]])
-        ind1 = _query_initial_box(grid1_initial, p0, offsets, mb)
+        ind1 = _query_initial_box(grid1_initial, p0, offsets, mb, hits=hits, stage="f0_initial")
         if ind1.size == 0:
             continue
 
@@ -128,7 +174,12 @@ def _paths_from_frame0(
             p1 = np.array([f1.x[i1], f1.y[i1], f1.z[i1]])
             pred2 = 2.0 * p1 - p0
 
-            ind2 = _cap(grid2.query_center_box(pred2[0], pred2[1], pred2[2], b), mb)
+            ind2 = _cap(
+                grid2.query_center_box(pred2[0], pred2[1], pred2[2], b),
+                mb,
+                hits=hits,
+                stage="f0_hop2",
+            )
             if ind2.size == 0:
                 continue
 
@@ -137,28 +188,38 @@ def _paths_from_frame0(
 
                 if params.allow_3_frame:
                     cost2 = distance_xyz(pred2, p2)
+                    hop2 = cost2
                     candidates.append(
                         PathCandidate(
                             start_layer=0,
                             indices=(int(i0), int(i1), int(i2)),
                             cost=cost2,
+                            hop_distances=(hop2,),
                         )
                     )
                     n_branches += 1
 
                 pred3 = predict_third_frame_position_xyz(p0, p1, p2)
-                ind3 = _cap(grid3.query_center_box(pred3[0], pred3[1], pred3[2], b), mb)
+                ind3 = _cap(
+                    grid3.query_center_box(pred3[0], pred3[1], pred3[2], b),
+                    mb,
+                    hits=hits,
+                    stage="f0_hop3",
+                )
                 if ind3.size == 0:
                     continue
 
                 for i3 in ind3:
                     p3 = np.array([f3.x[i3], f3.y[i3], f3.z[i3]])
                     cost3 = distance_xyz(pred3, p3)
+                    hop2 = distance_xyz(pred2, p2)
+                    hop3 = cost3
                     candidates.append(
                         PathCandidate(
                             start_layer=0,
                             indices=(int(i0), int(i1), int(i2), int(i3)),
                             cost=cost3,
+                            hop_distances=(hop2, hop3),
                         )
                     )
                     n_branches += 1
@@ -179,6 +240,7 @@ def _paths_from_frame1(
     *,
     progress_interval: int = 0,
     progress_label: str = "graph f1 seeds",
+    hits: MaxBranchHits | None = None,
 ) -> tuple[list[PathCandidate], list[int]]:
     """3-frame paths f1 → f2 → f3 seeded on frame 1."""
     _, f1, f2, f3 = block.frames
@@ -192,7 +254,7 @@ def _paths_from_frame1(
     for si, i1 in enumerate(seed_ids, start=1):
         progress(progress_label, si, n_seeds, interval=progress_interval, t0=t0)
         p1 = np.array([f1.x[i1], f1.y[i1], f1.z[i1]])
-        ind2 = _query_initial_box(grid2_initial, p1, offsets, mb)
+        ind2 = _query_initial_box(grid2_initial, p1, offsets, mb, hits=hits, stage="f1_initial")
         if ind2.size == 0:
             continue
 
@@ -201,18 +263,25 @@ def _paths_from_frame1(
             p2 = np.array([f2.x[i2], f2.y[i2], f2.z[i2]])
             pred3 = 2.0 * p2 - p1
 
-            ind3 = _cap(grid3.query_center_box(pred3[0], pred3[1], pred3[2], b), mb)
+            ind3 = _cap(
+                grid3.query_center_box(pred3[0], pred3[1], pred3[2], b),
+                mb,
+                hits=hits,
+                stage="f1_hop3",
+            )
             if ind3.size == 0:
                 continue
 
             for i3 in ind3:
                 p3 = np.array([f3.x[i3], f3.y[i3], f3.z[i3]])
                 cost = distance_xyz(pred3, p3)
+                hop3 = cost
                 candidates.append(
                     PathCandidate(
                         start_layer=1,
                         indices=(int(i1), int(i2), int(i3)),
                         cost=cost,
+                        hop_distances=(hop3,),
                     )
                 )
                 n_branches += 1
@@ -247,6 +316,7 @@ def _paths_from_frame3(
     *,
     progress_interval: int = 0,
     progress_label: str = "graph f3 seeds (backward)",
+    hits: MaxBranchHits | None = None,
 ) -> tuple[list[PathCandidate], list[int]]:
     """4-frame paths f3 → f2 → f1 → f0 seeded on frame 3 (backward in time)."""
     f0, f1, f2, f3 = block.frames
@@ -260,7 +330,7 @@ def _paths_from_frame3(
     for si, i3 in enumerate(seed_ids, start=1):
         progress(progress_label, si, n_seeds, interval=progress_interval, t0=t0)
         p3 = np.array([f3.x[i3], f3.y[i3], f3.z[i3]])
-        ind2 = _query_initial_box(grid2_initial, p3, offsets, mb)
+        ind2 = _query_initial_box(grid2_initial, p3, offsets, mb, hits=hits, stage="f3_initial")
         if ind2.size == 0:
             continue
 
@@ -269,7 +339,12 @@ def _paths_from_frame3(
             p2 = np.array([f2.x[i2], f2.y[i2], f2.z[i2]])
             pred1 = predict_prev_constant_velocity_xyz(p2, p3)
 
-            ind1 = _cap(grid1.query_center_box(pred1[0], pred1[1], pred1[2], b), mb)
+            ind1 = _cap(
+                grid1.query_center_box(pred1[0], pred1[1], pred1[2], b),
+                mb,
+                hits=hits,
+                stage="f3_hop1",
+            )
             if ind1.size == 0:
                 continue
 
@@ -277,18 +352,26 @@ def _paths_from_frame3(
                 p1 = np.array([f1.x[i1], f1.y[i1], f1.z[i1]])
                 pred0 = predict_first_frame_position_xyz(p1, p2, p3)
 
-                ind0 = _cap(grid0.query_center_box(pred0[0], pred0[1], pred0[2], b), mb)
+                ind0 = _cap(
+                    grid0.query_center_box(pred0[0], pred0[1], pred0[2], b),
+                    mb,
+                    hits=hits,
+                    stage="f3_hop0",
+                )
                 if ind0.size == 0:
                     continue
 
                 for i0 in ind0:
                     p0 = np.array([f0.x[i0], f0.y[i0], f0.z[i0]])
                     cost0 = distance_xyz(pred0, p0)
+                    hop1 = distance_xyz(pred1, p1)
+                    hop0 = cost0
                     candidates.append(
                         PathCandidate(
                             start_layer=0,
                             indices=(int(i0), int(i1), int(i2), int(i3)),
                             cost=cost0,
+                            hop_distances=(hop1, hop0),
                         )
                     )
                     n_branches += 1
@@ -316,6 +399,7 @@ def _enumerate_forward(
     rng: np.random.Generator,
     offsets: tuple[float, ...],
     ppi: int,
+    hits: MaxBranchHits,
 ) -> tuple[list[PathCandidate], list[int], dict]:
     """Forward path enumeration (frame 0 / frame 1 seeds)."""
     f0, f1, f2, _ = block.frames
@@ -331,12 +415,14 @@ def _enumerate_forward(
     seeds0 = np.arange(f0.n, dtype=np.int64)
     if params.max_seeds > 0 and params.max_seeds < f0.n:
         seeds0 = subsample_indices(f0.n, params.max_seeds, rng)
-    log(f"[graph] Enumerating forward paths from frame 0 ({len(seeds0)} seeds)...")
+    if not params.quiet_linking:
+        log(f"[graph] Enumerating forward paths from frame 0 ({len(seeds0)} seeds)...")
 
     c0, branches0 = _paths_from_frame0(
         block, params, seeds0, grid1_initial, grid2, grid3, offsets,
         progress_interval=ppi,
         progress_label="graph f0 seeds",
+        hits=hits,
     )
 
     candidates = list(c0)
@@ -348,11 +434,13 @@ def _enumerate_forward(
         if params.max_seeds > 0 and params.max_seeds < f1.n:
             seeds1 = subsample_indices(f1.n, params.max_seeds, rng)
         grid2_initial = _make_grid(f2.x, f2.y, f2.z, init_cs, use_numba=nb)
-        log(f"[graph] Enumerating 3-frame paths from frame 1 ({len(seeds1)} seeds)...")
+        if not params.quiet_linking:
+            log(f"[graph] Enumerating 3-frame paths from frame 1 ({len(seeds1)} seeds)...")
         c1, branches1 = _paths_from_frame1(
             block, params, seeds1, grid2_initial, grid3, offsets,
             progress_interval=ppi,
             progress_label="graph f1 seeds",
+            hits=hits,
         )
         candidates.extend(c1)
         branches.extend(branches1)
@@ -371,6 +459,7 @@ def _enumerate_backward(
     rng: np.random.Generator,
     offsets: tuple[float, ...],
     ppi: int,
+    hits: MaxBranchHits,
 ) -> tuple[list[PathCandidate], list[int], dict]:
     """Backward 4-frame enumeration seeded on frame 3."""
     f0, f1, f2, f3 = block.frames
@@ -386,12 +475,14 @@ def _enumerate_backward(
     seeds3 = np.arange(f3.n, dtype=np.int64)
     if params.max_seeds > 0 and params.max_seeds < f3.n:
         seeds3 = subsample_indices(f3.n, params.max_seeds, rng)
-    log(f"[graph] Enumerating backward paths from frame 3 ({len(seeds3)} seeds)...")
+    if not params.quiet_linking:
+        log(f"[graph] Enumerating backward paths from frame 3 ({len(seeds3)} seeds)...")
 
     candidates, branches = _paths_from_frame3(
         block, params, seeds3, grid2_initial, grid1, grid0, bwd_offsets,
         progress_interval=ppi,
         progress_label="graph f3 seeds (backward)",
+        hits=hits,
     )
     meta = {"n_seeds_frame3": int(seeds3.size)}
     return candidates, branches, meta
@@ -410,16 +501,20 @@ def link_block(block: BlockFrames, params: LinkParams) -> BlockResult:
     f0, f1, _, f3 = block.frames
     rng = np.random.default_rng(params.seed_rng)
     offsets = _initial_box_offsets(params)
-    ppi = params.progress_interval
+    ppi = -1 if params.quiet_linking else params.progress_interval
+    quiet = params.quiet_linking
 
-    log(
-        f"[graph] Block {block.frame_indices}: "
-        f"{f0.n}, {f1.n}, {block.frames[2].n}, {f3.n} particles/frame"
-    )
-    log("[graph] Building spatial grids...")
+    if not quiet:
+        log(
+            f"[graph] Block {block.frame_indices}: "
+            f"{f0.n}, {f1.n}, {block.frames[2].n}, {f3.n} particles/frame"
+        )
+        log("[graph] Building spatial grids...")
+
+    hits = MaxBranchHits()
 
     candidates, branches, fwd_meta = _enumerate_forward(
-        block, params, rng, offsets, ppi,
+        block, params, rng, offsets, ppi, hits,
     )
     n_seeds_tried = fwd_meta["n_seeds_frame0"] + fwd_meta["n_seeds_frame1"]
 
@@ -430,24 +525,29 @@ def link_block(block: BlockFrames, params: LinkParams) -> BlockResult:
 
     if params.use_bidirectional_graph:
         bwd_candidates, bwd_branches, bwd_meta = _enumerate_backward(
-            block, params, rng, offsets, ppi,
+            block, params, rng, offsets, ppi, hits,
         )
         branches.extend(bwd_branches)
         n_seeds_tried += bwd_meta["n_seeds_frame3"]
 
         candidates, combine_stats = combine_bidirectional_four_frame(
-            candidates, bwd_candidates,
+            candidates,
+            bwd_candidates,
         )
         n_bidir = combine_stats["n_bidirectional_4frame"]
         n_fwd_only_4 = combine_stats["n_forward_only_4frame"]
         n_bwd_only_4 = combine_stats["n_backward_only_4frame"]
-        log(
-            f"[graph] Bidirectional graph: {len(candidates)} combined candidates "
-            f"({n_bidir} both directions, {n_fwd_only_4} forward-only, "
-            f"{n_bwd_only_4} backward-only)"
-        )
+        if not quiet:
+            log(
+                f"[graph] Bidirectional graph (consensus): {len(candidates)} combined candidates "
+                f"({n_bidir} both directions, {n_fwd_only_4} forward-only dropped, "
+                f"{n_bwd_only_4} backward-only dropped)"
+            )
 
-    log(f"[graph] Done: {len(candidates)} path candidates")
+    if not quiet:
+        log(f"[graph] Done: {len(candidates)} path candidates")
+
+    _warn_max_branch_hits(block.frame_indices, params, hits)
 
     n4 = sum(1 for c in candidates if c.length == 4)
     n3_f0 = sum(1 for c in candidates if c.length == 3 and c.start_layer == 0)
@@ -462,6 +562,9 @@ def link_block(block: BlockFrames, params: LinkParams) -> BlockResult:
         "n_seeds_frame1": fwd_meta["n_seeds_frame1"],
         "n_seeds_tried": n_seeds_tried,
         "mean_branches_per_seed": float(np.mean(branches)) if branches else 0.0,
+        "max_branch_hits": hits.events,
+        "max_branch_max_overflow": hits.max_overflow,
+        "max_branch_hits_by_stage": dict(hits.by_stage),
         "use_bidirectional_graph": params.use_bidirectional_graph,
         "n_bidirectional_4frame": n_bidir,
         "n_forward_only_4frame": n_fwd_only_4,

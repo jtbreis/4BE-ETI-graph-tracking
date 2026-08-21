@@ -16,11 +16,14 @@ class PathCandidate:
     or 1 for paths beginning at the second frame.
 
     ``indices`` has length 3 or 4 (local particle index in each frame used).
+
+    ``hop_distances`` stores each track-box hop distance (mm) at graph build time.
     """
 
     start_layer: int
     indices: tuple[int, ...]
     cost: float
+    hop_distances: tuple[float, ...] = ()
 
     @property
     def length(self) -> int:
@@ -36,12 +39,7 @@ def combine_bidirectional_four_frame(
     forward: list[PathCandidate],
     backward: list[PathCandidate],
 ) -> tuple[list[PathCandidate], dict[str, int]]:
-    """
-    Merge forward and backward 4-frame candidates into one assignment graph.
-
-    Paths found in both directions get cost = forward_cost + backward_cost.
-    Paths found in only one direction keep that direction's endpoint cost.
-    """
+    """Keep only 4-frame paths found in both forward and backward enumerations."""
     fwd_4 = {
         path_indices_key(c): c
         for c in forward
@@ -68,15 +66,12 @@ def combine_bidirectional_four_frame(
                 cost=fc.cost + bc.cost,
             )
         )
-    for key in fwd_only:
-        combined.append(fwd_4[key])
-    for key in bwd_only:
-        combined.append(bwd_4[key])
 
     stats = {
         "n_bidirectional_4frame": len(both),
         "n_forward_only_4frame": len(fwd_only),
         "n_backward_only_4frame": len(bwd_only),
+        "n_combined_candidates": len(combined),
     }
     return combined, stats
 
