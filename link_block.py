@@ -43,10 +43,12 @@ class LinkParams:
     max_seeds: int = 0  # 0 = all seeds on frame 0 / frame 1
     seed_rng: int = 0
     allow_3_frame: bool = True
-    use_bidirectional_graph: bool = False  # consensus 4-frame paths from forward + backward graphs
+    # consensus 4-frame paths from forward + backward graphs
+    use_bidirectional_graph: bool = False
     use_numba: bool = True  # Numba CSR grid queries when numba is installed
     quiet_linking: bool = False  # suppress per-seed / phase logs inside link_block
-    progress_interval: int = 5000  # print every N seeds; 0 = end markers only; ignored if quiet_linking
+    # print every N seeds; 0 = end markers only; ignored if quiet_linking
+    progress_interval: int = 5000
 
 
 @dataclass
@@ -163,9 +165,11 @@ def _paths_from_frame0(
     t0 = time.perf_counter() if progress_interval >= 0 else None
 
     for si, i0 in enumerate(seed_ids, start=1):
-        progress(progress_label, si, n_seeds, interval=progress_interval, t0=t0)
+        progress(progress_label, si, n_seeds,
+                 interval=progress_interval, t0=t0)
         p0 = np.array([f0.x[i0], f0.y[i0], f0.z[i0]])
-        ind1 = _query_initial_box(grid1_initial, p0, offsets, mb, hits=hits, stage="f0_initial")
+        ind1 = _query_initial_box(
+            grid1_initial, p0, offsets, mb, hits=hits, stage="f0_initial")
         if ind1.size == 0:
             continue
 
@@ -252,9 +256,11 @@ def _paths_from_frame1(
     t0 = time.perf_counter() if progress_interval >= 0 else None
 
     for si, i1 in enumerate(seed_ids, start=1):
-        progress(progress_label, si, n_seeds, interval=progress_interval, t0=t0)
+        progress(progress_label, si, n_seeds,
+                 interval=progress_interval, t0=t0)
         p1 = np.array([f1.x[i1], f1.y[i1], f1.z[i1]])
-        ind2 = _query_initial_box(grid2_initial, p1, offsets, mb, hits=hits, stage="f1_initial")
+        ind2 = _query_initial_box(
+            grid2_initial, p1, offsets, mb, hits=hits, stage="f1_initial")
         if ind2.size == 0:
             continue
 
@@ -328,9 +334,11 @@ def _paths_from_frame3(
     t0 = time.perf_counter() if progress_interval >= 0 else None
 
     for si, i3 in enumerate(seed_ids, start=1):
-        progress(progress_label, si, n_seeds, interval=progress_interval, t0=t0)
+        progress(progress_label, si, n_seeds,
+                 interval=progress_interval, t0=t0)
         p3 = np.array([f3.x[i3], f3.y[i3], f3.z[i3]])
-        ind2 = _query_initial_box(grid2_initial, p3, offsets, mb, hits=hits, stage="f3_initial")
+        ind2 = _query_initial_box(
+            grid2_initial, p3, offsets, mb, hits=hits, stage="f3_initial")
         if ind2.size == 0:
             continue
 
@@ -410,13 +418,15 @@ def _enumerate_forward(
 
     grid1_initial = _make_grid(f1.x, f1.y, f1.z, init_cs, use_numba=nb)
     grid2 = _make_grid(f2.x, f2.y, f2.z, track_cs, use_numba=nb)
-    grid3 = _make_grid(block.frames[3].x, block.frames[3].y, block.frames[3].z, track_cs, use_numba=nb)
+    grid3 = _make_grid(
+        block.frames[3].x, block.frames[3].y, block.frames[3].z, track_cs, use_numba=nb)
 
     seeds0 = np.arange(f0.n, dtype=np.int64)
     if params.max_seeds > 0 and params.max_seeds < f0.n:
         seeds0 = subsample_indices(f0.n, params.max_seeds, rng)
     if not params.quiet_linking:
-        log(f"[graph] Enumerating forward paths from frame 0 ({len(seeds0)} seeds)...")
+        log(
+            f"[graph] Enumerating forward paths from frame 0 ({len(seeds0)} seeds)...")
 
     c0, branches0 = _paths_from_frame0(
         block, params, seeds0, grid1_initial, grid2, grid3, offsets,
@@ -435,7 +445,8 @@ def _enumerate_forward(
             seeds1 = subsample_indices(f1.n, params.max_seeds, rng)
         grid2_initial = _make_grid(f2.x, f2.y, f2.z, init_cs, use_numba=nb)
         if not params.quiet_linking:
-            log(f"[graph] Enumerating 3-frame paths from frame 1 ({len(seeds1)} seeds)...")
+            log(
+                f"[graph] Enumerating 3-frame paths from frame 1 ({len(seeds1)} seeds)...")
         c1, branches1 = _paths_from_frame1(
             block, params, seeds1, grid2_initial, grid3, offsets,
             progress_interval=ppi,
@@ -468,7 +479,8 @@ def _enumerate_backward(
     track_cs = track_grid_cell_size(b)
     init_cs = initial_grid_cell_size(bwd_offsets, b)
 
-    grid2_initial = _make_grid(f2.x, f2.y, f2.z, init_cs, use_numba=params.use_numba)
+    grid2_initial = _make_grid(
+        f2.x, f2.y, f2.z, init_cs, use_numba=params.use_numba)
     grid1 = _make_grid(f1.x, f1.y, f1.z, track_cs, use_numba=params.use_numba)
     grid0 = _make_grid(f0.x, f0.y, f0.z, track_cs, use_numba=params.use_numba)
 
@@ -476,7 +488,8 @@ def _enumerate_backward(
     if params.max_seeds > 0 and params.max_seeds < f3.n:
         seeds3 = subsample_indices(f3.n, params.max_seeds, rng)
     if not params.quiet_linking:
-        log(f"[graph] Enumerating backward paths from frame 3 ({len(seeds3)} seeds)...")
+        log(
+            f"[graph] Enumerating backward paths from frame 3 ({len(seeds3)} seeds)...")
 
     candidates, branches = _paths_from_frame3(
         block, params, seeds3, grid2_initial, grid1, grid0, bwd_offsets,
